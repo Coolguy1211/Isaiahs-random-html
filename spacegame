@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>P2P Space Game</title>
+    <style>
+        canvas {
+            border: 1px solid black;
+            background-color: black;
+        }
+        #gameControls {
+            margin: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameControls">
+        <button id="hostGame">Host Game</button>
+        <button id="joinGame">Join Game</button>
+        <input type="text" id="connectionId" placeholder="Connection ID">
+    </div>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+
+    <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        let peer = null;
+        let conn = null;
+        let playerId = null;
+        
+        const players = new Map();
+        
+        class Spaceship {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.speed = 5;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y - 15);
+                ctx.lineTo(this.x - 10, this.y + 10);
+                ctx.lineTo(this.x + 10, this.y + 10);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            update(keys) {
+                if (keys.ArrowLeft) this.x -= this.speed;
+                if (keys.ArrowRight) this.x += this.speed;
+                if (keys.ArrowUp) this.y -= this.speed;
+                if (keys.ArrowDown) this.y += this.speed;
+                
+                this.x = Math.max(0, Math.min(canvas.width, this.x));
+                this.y = Math.max(0, Math.min(canvas.height, this.y));
+            }
+        }
+
+        const keys = {
+            ArrowLeft: false,
+            ArrowRight: false,
+            ArrowUp: false,
+            ArrowDown: false
+        };
+
+        document.getElementById('hostGame').addEventListener('click', () => {
+            peer = new Peer();
+            peer.on('open', (id) => {
+                document.getElementById('connectionId').value = id;
+                playerId = id;
+                players.set(playerId, new Spaceship(100, 300, 'blue'));
+                startGameLoop();
+            });
+            peer.on('connection', (connection) => {
+                conn = connection;
+                setupConnection();
+            });
+        });
+
+        document.getElementById('joinGame').addEventListener('click', () => {
+            const hostId = document.getElementById('connectionId').value;
+            peer = new Peer();
+            peer.on('open', (id) => {
+                playerId = id;
+                players.set(playerId, new Spaceship(700, 300, 'red'));
+                conn = peer.connect(hostId);
+                setupConnection();
+                startGameLoop();
+            });
+        });
+
+        function setupConnection() {
+            conn.on('data', (data) => {
+                if (data.type === 'position') {
+                    if (!players.has(data.id)) {
+                        players.set(data.id, new Spaceship(data.x, data.y, data.id === playerId ? 'blue' : 'red'));
+                    }
+                    const player = players.get(data.id);
+                    player.x = data.x;
+                    player.y = data.y;
+                }
+            });
+        }
+
+        function sendPosition() {
+            if (conn && players.has(playerId)) {
+                const player = players.get(playerId);
+                conn.send({
+                    type: 'position',
+                    id: playerId,
+                    x: player.x,
+                    y: player.y
+                });
+            }
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.key)) {
+                keys[e.key] = true;
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.key)) {
+                keys[e.key] = false;
+            }
+        });
+
+        function gameLoop() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (players.has(playerId)) {
+                const player = players.get(playerId);
+                player.update(keys);
+                sendPosition();
+            }
+
+            for (let player of players.values()) {
+                player.draw();
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function startGameLoop() {
+            gameLoop();
+        }
+    </script>
+</body>
+</html>
