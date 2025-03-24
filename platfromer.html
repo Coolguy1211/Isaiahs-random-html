@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Epic Platformer Shooter – Improved Aiming</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #111;
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      color: #fff;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      margin: 0 auto;
+      background: #000;
+    }
+    #menu, #ui {
+      position: absolute;
+      width: 100%;
+      text-align: center;
+      z-index: 10;
+    }
+    #menu {
+      top: 30%;
+      opacity: 1;
+      transition: opacity 0.5s ease;
+    }
+    #menu.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+    #menu h1 {
+      font-size: 48px;
+      margin-bottom: 20px;
+      text-shadow: 0 0 10px #0ff;
+      animation: glow 2s infinite alternate;
+    }
+    #menu button {
+      padding: 12px 30px;
+      font-size: 22px;
+      cursor: pointer;
+      border: none;
+      border-radius: 4px;
+      background: #0f0;
+      color: #000;
+      transition: background 0.3s ease;
+    }
+    #menu button:hover {
+      background: #8f8;
+    }
+    #ui {
+      top: 10px;
+      display: none;
+    }
+    #ui span {
+      margin: 0 15px;
+      font-size: 20px;
+    }
+    #ui button {
+      padding: 6px 12px;
+      font-size: 18px;
+      margin-left: 20px;
+      cursor: pointer;
+      border: none;
+      border-radius: 4px;
+      background: #f00;
+      color: #fff;
+    }
+    @keyframes glow {
+      from { text-shadow: 0 0 10px #0ff; }
+      to { text-shadow: 0 0 20px #0ff; }
+    }
+  </style>
+  <!-- PeerJS for basic P2P multiplayer support -->
+  <script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
+</head>
+<body>
+  <!-- Main Menu -->
+  <div id="menu">
+    <h1>Epic Platformer Shooter</h1>
+    <button id="startBtn">Start Game</button>
+  </div>
+  <!-- Game UI -->
+  <div id="ui">
+    <span id="score">Score: 0</span>
+    <span id="health">Health: 100</span>
+    <span id="gameOver" style="display:none; color:#f00; font-weight:bold;">Game Over!</span>
+    <button id="restartBtn" style="display:none;">Restart</button>
+  </div>
+  <canvas id="gameCanvas" width="800" height="600"></canvas>
+  <script>
+    /* =============================
+       GLOBAL VARIABLES & GAME STATES
+       ============================= */
+    const canvas = document.getElementById("gameCanvas");
+    const ctx = canvas.getContext("2d");
+    
+    // UI elements
+    const menuDiv = document.getElementById("menu");
+    const uiDiv = document.getElementById("ui");
+    const startBtn = document.getElementById("startBtn");
+    const restartBtn = document.getElementById("restartBtn");
+    const scoreElement = document.getElementById("score");
+    const healthElement = document.getElementById("health");
+    const gameOverElement = document.getElementById("gameOver");
+
+    let gameState = "menu"; // "menu", "playing", "gameover"
+    let lastTime = performance.now();
+    let enemySpawnTimer = 0;
+    const enemySpawnInterval = 2500;
+    
+    // World dimensions (wider than the canvas for side scrolling)
+    const worldWidth = 2000;
+    
+    // Camera offset for side scrolling
+    let cameraOffsetX = 0;
+    
+    /* =============================
+       MODDING API (for future mods)
+       ============================= */
+    window.mods = [];
+    window.registerMod = function(mod) {
+      window.mods.push(mod);
+      if (gameState === "playing" && mod.onGameStart) mod.onGameStart();
+    };
+    function callMods(hookName, ...args) {
+      window.mods.forEach(mod => {
+        if (typeof mod[hookName] === "function") mod[hookName](...args);
+      });
+    }
+
+    /* =============================
+       PEERJS SETUP (Multiplayer Foundation)
+       ============================= */
+    const peer = new Peer();
+    let conn = null;
+    peer.on("open", id => {
+      console.log("My peer ID is: " + id);
+    });
+    peer.on("connection", c => {
+      conn = c;
+      setupConnection();
+    });
+    function setupConnection() {
+      conn.on("data", data => {
+        remotePlayer.x = data.x;
+        remotePlayer.y = data.y;
+        remotePlayer.vx = data.vx;
+        remotePlayer.vy = data.vy;
+        remotePlayer.aimAngle = data.aimAngle;
+      });
+    }
+
+    /* =============================
+       GAME WORLD SETUP
+       ============================= */
+    // Define the continuous floor as the first platform.
+    const platforms = [
+      { x: 0, y: 550, width: worldWidth, height: 50, color: "#4b3621" },
+      { x: 300, y: 420, width: 200, height: 20, color: "#654321" },
+      { x: 900, y: 370, width: 200, height: 20, color: "#654321" },
+      { x: 1400, y: 320, width: 150, height: 20, color: "#654321" }
+    ];
+    
+    // Local player with an aimAngle (in radians). Default aim to the right (0 radians).
+    const localPlayer = {
+      x: 50,
+      y: 500,
+      width: 40,
+      height: 40,
+      vx: 0,
+      vy: 0,
+      speed: 4,
+      jumpStrength: -12,
+      onGround: false,
+      aimAngle: 0,
+      health: 100,
+      score: 0,
+      lastShotTime: 0,
+      shotCooldown: 300,
+      animFrame: 0
+    };
+    // Remote player (for P2P multiplayer) with aimAngle.
+    const remotePlayer = {
+      x: 700,
+      y: 500,
+      width: 40,
+      height: 40,
+      vx: 0,
+      vy: 0,
+      aimAngle: Math.PI, // Default aim left
+      health: 100,
+      animFrame: 0
+    };
+    
+    const bullets = [];
+    const enemies = [];
+    const particles = []; // for background and impact effects
+    
+    // Gravity constant
+    const gravity = 0.5;
+    
+    // Maximum number of enemies allowed at a time
+    const maxEnemies = 5;
+    
+    /* =============================
+       INPUT HANDLING (Keyboard, Mouse & Gamepad)
+       ============================= */
+    const keys = {};
+    document.addEventListener("keydown", e => {
+      keys[e.code] = true;
+      if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) {
+        e.preventDefault();
+      }
+      // Shooting with Space still works.
+      if (e.code === "Space" && gameState === "playing") {
+        const now = performance.now();
+        if (now - localPlayer.lastShotTime > localPlayer.shotCooldown) {
+          shootBullet();
+          localPlayer.lastShotTime = now;
+        }
+      }
+    });
+    document.addEventListener("keyup", e => {
+      keys[e.code] = false;
+    });
+    
+    // Mouse movement updates aimAngle (for keyboard/mouse users).
+    canvas.addEventListener("mousemove", e => {
+      // Calculate mouse position relative to canvas and adjust for camera offset.
+      const rect = canvas.getBoundingClientRect();
+      const mouseX = e.clientX - rect.left + cameraOffsetX;
+      const mouseY = e.clientY - rect.top;
+      // Compute angle from player's center.
+      const dx = mouseX - (localPlayer.x + localPlayer.width / 2);
+      const dy = mouseY - (localPlayer.y + localPlayer.height / 2);
+      localPlayer.aimAngle = Math.atan2(dy, dx);
+    });
+    
+    // Gamepad support.
+    let gamepadIndex = null;
+    window.addEventListener("gamepadconnected", e => { gamepadIndex = e.gamepad.index; });
+    window.addEventListener("gamepaddisconnected", e => { if (gamepadIndex === e.gamepad.index) gamepadIndex = null; });
+    
+    /* =============================
+       GAME FUNCTIONS
+       ============================= */
+    function shootBullet() {
+      // Bullets now use the aimAngle for both x and y velocity.
+      const speed = 7;
+      bullets.push({
+        x: localPlayer.x + localPlayer.width / 2,
+        y: localPlayer.y + localPlayer.height / 2,
+        radius: 5,
+        dx: Math.cos(localPlayer.aimAngle) * speed,
+        dy: Math.sin(localPlayer.aimAngle) * speed
+      });
+      // Particle burst for flair.
+      createParticles(localPlayer.x + localPlayer.width/2, localPlayer.y + localPlayer.height/2, 10);
+    }
+    
+    function spawnEnemy() {
+      if (enemies.length < maxEnemies) {
+        const plat = platforms[Math.floor(Math.random() * (platforms.length - 1)) + 1];
+        enemies.push({
+          x: plat.x + Math.random() * (plat.width - 40),
+          y: plat.y - 40,
+          width: 40,
+          height: 40,
+          speed: 2,
+          direction: Math.random() < 0.5 ? "left" : "right",
+          platform: plat
+        });
+      }
+    }
+    
+    function createParticles(x, y, count) {
+      for (let i = 0; i < count; i++) {
+        particles.push({
+          x: x,
+          y: y,
+          vx: (Math.random() - 0.5) * 3,
+          vy: (Math.random() - 0.5) * 3,
+          life: 60,
+          color: "rgba(255,255,0,0.8)"
+        });
+      }
+    }
+    
+    // Collision helpers.
+    function rectsCollide(a, b) {
+      return a.x < b.x + b.width &&
+             a.x + a.width > b.x &&
+             a.y < b.y + b.height &&
+             a.y + a.height > b.y;
+    }
+    function bulletHitsEnemy(bullet, enemy) {
+      return bullet.x + bullet.radius > enemy.x &&
+             bullet.x - bullet.radius < enemy.x + enemy.width &&
+             bullet.y + bullet.radius > enemy.y &&
+             bullet.y - bullet.radius < enemy.y + enemy.height;
+    }
+    
+    /* =============================
+       GAME LOOP FUNCTIONS
+       ============================= */
+    function update(delta) {
+      if (gameState !== "playing") return;
+      
+      // --- Local Player Movement ---
+      if (keys["ArrowLeft"]) { localPlayer.vx = -localPlayer.speed; }
+      else if (keys["ArrowRight"]) { localPlayer.vx = localPlayer.speed; }
+      else { localPlayer.vx = 0; }
+      
+      if (keys["ArrowUp"] && localPlayer.onGround) {
+        localPlayer.vy = localPlayer.jumpStrength;
+        localPlayer.onGround = false;
+      }
+      
+      // --- Controller Right Stick Aiming ---
+      const gamepads = navigator.getGamepads();
+      if (gamepadIndex !== null && gamepads[gamepadIndex]) {
+        const gp = gamepads[gamepadIndex];
+        // Assume axes[2] and axes[3] are the right stick.
+        if (gp.axes.length >= 4) {
+          const rx = gp.axes[2];
+          const ry = gp.axes[3];
+          // If stick moved enough, update aim angle.
+          if (Math.abs(rx) > 0.2 || Math.abs(ry) > 0.2) {
+            localPlayer.aimAngle = Math.atan2(ry, rx);
+          }
+        }
+        // Also allow movement and jumping via controller.
+        if (Math.abs(gp.axes[0]) > 0.2) {
+          localPlayer.vx = gp.axes[0] * localPlayer.speed * 2;
+        }
+        if (gp.buttons[0].pressed && localPlayer.onGround) {
+          localPlayer.vy = localPlayer.jumpStrength;
+          localPlayer.onGround = false;
+        }
+        // Controller shooting with button 1.
+        if (gp.buttons[1].pressed) {
+          const now = performance.now();
+          if (now - localPlayer.lastShotTime > localPlayer.shotCooldown) {
+            shootBullet();
+            localPlayer.lastShotTime = now;
+          }
+        }
+      }
+      
+      // --- Apply Physics ---
+      localPlayer.vy += gravity;
+      localPlayer.x += localPlayer.vx * (delta/16.67);
+      localPlayer.y += localPlayer.vy * (delta/16.67);
+      
+      // --- Platform Collision for Local Player ---
+      localPlayer.onGround = false;
+      platforms.forEach((plat, index) => {
+        if (localPlayer.x < plat.x + plat.width &&
+            localPlayer.x + localPlayer.width > plat.x) {
+          // For the continuous floor.
+          if (index === 0) {
+            if (localPlayer.y + localPlayer.height > plat.y) {
+              localPlayer.y = plat.y - localPlayer.height;
+              localPlayer.vy = 0;
+              localPlayer.onGround = true;
+            }
+          } else {
+            if (localPlayer.vy >= 0 && localPlayer.y + localPlayer.height > plat.y && localPlayer.y + localPlayer.height - localPlayer.vy <= plat.y + 5) {
+              localPlayer.y = plat.y - localPlayer.height;
+              localPlayer.vy = 0;
+              localPlayer.onGround = true;
+            }
+          }
+        }
+      });
+      
+      // Constrain player horizontally within world.
+      if (localPlayer.x < 0) localPlayer.x = 0;
+      if (localPlayer.x + localPlayer.width > worldWidth) localPlayer.x = worldWidth - localPlayer.width;
+      
+      // If falling off screen, game over.
+      if (localPlayer.y > canvas.height) { gameState = "gameover"; endGame(); }
+      
+      // --- Update Bullets (using dx/dy based on aim) ---
+      for (let i = 0; i < bullets.length; i++) {
+        bullets[i].x += bullets[i].dx * (delta/16.67);
+        bullets[i].y += bullets[i].dy * (delta/16.67);
+        if (bullets[i].x < 0 || bullets[i].x > worldWidth ||
+            bullets[i].y < 0 || bullets[i].y > canvas.height) {
+          bullets.splice(i, 1);
+          i--;
+        }
+      }
+      
+      // --- Update Enemies ---
+      enemies.forEach((enemy, index) => {
+        if (enemy.direction === "left") {
+          enemy.x -= enemy.speed * (delta/16.67);
+          if (enemy.x < enemy.platform.x) enemy.direction = "right";
+        } else {
+          enemy.x += enemy.speed * (delta/16.67);
+          if (enemy.x + enemy.width > enemy.platform.x + enemy.platform.width) enemy.direction = "left";
+        }
+        if (rectsCollide(enemy, localPlayer)) {
+          localPlayer.health -= 0.5 * (delta/16.67);
+          healthElement.textContent = "Health: " + Math.max(0, Math.floor(localPlayer.health));
+          if (localPlayer.health <= 0) { gameState = "gameover"; endGame(); }
+        }
+      });
+      
+      // --- Bullet vs Enemy Collision ---
+      for (let i = 0; i < bullets.length; i++) {
+        for (let j = 0; j < enemies.length; j++) {
+          if (bulletHitsEnemy(bullets[i], enemies[j])) {
+            localPlayer.score += 10;
+            scoreElement.textContent = "Score: " + localPlayer.score;
+            enemies.splice(j, 1);
+            bullets.splice(i, 1);
+            i--;
+            break;
+          }
+        }
+      }
+      
+      // --- Update Particles ---
+      particles.forEach((p, idx) => {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.life--;
+        if (p.life <= 0) { particles.splice(idx, 1); }
+      });
+      
+      // --- Spawn Enemies ---
+      enemySpawnTimer += delta;
+      if (enemySpawnTimer > enemySpawnInterval) { spawnEnemy(); enemySpawnTimer = 0; }
+      
+      // --- Update Camera (side scrolling) ---
+      cameraOffsetX = localPlayer.x - canvas.width / 2;
+      if (cameraOffsetX < 0) cameraOffsetX = 0;
+      if (cameraOffsetX > worldWidth - canvas.width) cameraOffsetX = worldWidth - canvas.width;
+      
+      // --- Send Local Player State Over P2P ---
+      if (conn && conn.open) {
+        conn.send({
+          x: localPlayer.x,
+          y: localPlayer.y,
+          vx: localPlayer.vx,
+          vy: localPlayer.vy,
+          aimAngle: localPlayer.aimAngle
+        });
+      }
+      
+      // --- Call Mod Hooks ---
+      callMods("onUpdate", delta, { localPlayer, enemies, bullets, particles });
+      
+      // --- Simple Animation ---
+      localPlayer.animFrame = (localPlayer.animFrame + 0.1) % 360;
+    }
+    
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      
+      // --- Draw Parallax Background ---
+      let bgGradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+      bgGradient.addColorStop(0, "#002");
+      bgGradient.addColorStop(1, "#000");
+      ctx.fillStyle = bgGradient;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      
+      // --- Draw Background Particles ---
+      particles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = Math.max(0, p.life/60);
+        ctx.beginPath();
+        ctx.arc(p.x - cameraOffsetX, p.y, 2, 0, Math.PI*2);
+        ctx.fill();
+        ctx.globalAlpha = 1;
+      });
+      
+      // --- Draw Platforms ---
+      platforms.forEach(plat => {
+        let grd = ctx.createLinearGradient(plat.x - cameraOffsetX, plat.y, plat.x - cameraOffsetX, plat.y + plat.height);
+        grd.addColorStop(0, lighten(plat.color, 20));
+        grd.addColorStop(1, plat.color);
+        ctx.fillStyle = grd;
+        ctx.fillRect(plat.x - cameraOffsetX, plat.y, plat.width, plat.height);
+      });
+      
+      // --- Draw Local Player ---
+      ctx.fillStyle = `hsl(${localPlayer.animFrame}, 100%, 50%)`;
+      ctx.fillRect(localPlayer.x - cameraOffsetX, localPlayer.y, localPlayer.width, localPlayer.height);
+      
+      // --- Draw Aim Indicator (line from center) ---
+      ctx.strokeStyle = "#fff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const centerX = localPlayer.x + localPlayer.width/2 - cameraOffsetX;
+      const centerY = localPlayer.y + localPlayer.height/2;
+      ctx.moveTo(centerX, centerY);
+      ctx.lineTo(centerX + Math.cos(localPlayer.aimAngle) * 50, centerY + Math.sin(localPlayer.aimAngle) * 50);
+      ctx.stroke();
+      
+      // --- Draw Remote Player ---
+      ctx.fillStyle = "#00f";
+      ctx.fillRect(remotePlayer.x - cameraOffsetX, remotePlayer.y, remotePlayer.width, remotePlayer.height);
+      
+      // --- Draw Bullets ---
+      ctx.fillStyle = "#ff0";
+      bullets.forEach(bullet => {
+        ctx.beginPath();
+        ctx.arc(bullet.x - cameraOffsetX, bullet.y, bullet.radius, 0, Math.PI*2);
+        ctx.fill();
+      });
+      
+      // --- Draw Enemies ---
+      enemies.forEach(enemy => {
+        ctx.fillStyle = "#f00";
+        ctx.fillRect(enemy.x - cameraOffsetX, enemy.y, enemy.width, enemy.height);
+      });
+      
+      // --- Draw Health Bar ---
+      ctx.fillStyle = "#f00";
+      ctx.fillRect(20, 20, (localPlayer.health / 100) * 150, 15);
+      ctx.strokeStyle = "#fff";
+      ctx.strokeRect(20, 20, 150, 15);
+      
+      callMods("onDraw", ctx);
+    }
+    
+    function lighten(hex, percent) {
+      let num = parseInt(hex.slice(1),16),
+          amt = Math.round(2.55 * percent),
+          R = (num >> 16) + amt,
+          G = (num >> 8 & 0x00FF) + amt,
+          B = (num & 0x0000FF) + amt;
+      return "#" + (0x1000000 + 
+        (R<255?R<1?0:R:255)*0x10000 + 
+        (G<255?G<1?0:G:255)*0x100 + 
+        (B<255?B<1?0:B:255))
+        .toString(16).slice(1);
+    }
+    
+    function endGame() {
+      gameOverElement.style.display = "inline";
+      restartBtn.style.display = "inline";
+      callMods("onGameOver", { localPlayer, enemies, bullets, particles });
+    }
+    
+    function gameLoop(currentTime) {
+      let delta = currentTime - lastTime;
+      lastTime = currentTime;
+      if (gameState === "playing") { update(delta); draw(); }
+      requestAnimationFrame(gameLoop);
+    }
+    
+    /* =============================
+       MAIN MENU & STATE MANAGEMENT
+       ============================= */
+    startBtn.addEventListener("click", () => {
+      menuDiv.classList.add("hidden");
+      uiDiv.style.display = "block";
+      gameOverElement.style.display = "none";
+      restartBtn.style.display = "none";
+      resetGame();
+      gameState = "playing";
+      callMods("onGameStart");
+    });
+    
+    restartBtn.addEventListener("click", () => {
+      resetGame();
+      gameOverElement.style.display = "none";
+      restartBtn.style.display = "none";
+      gameState = "playing";
+      callMods("onGameStart");
+    });
+    
+    function resetGame() {
+      localPlayer.x = 50;
+      localPlayer.y = 500;
+      localPlayer.vx = 0;
+      localPlayer.vy = 0;
+      localPlayer.health = 100;
+      localPlayer.score = 0;
+      localPlayer.animFrame = 0;
+      localPlayer.aimAngle = 0;
+      scoreElement.textContent = "Score: 0";
+      healthElement.textContent = "Health: 100";
+      bullets.length = 0;
+      enemies.length = 0;
+      particles.length = 0;
+      enemySpawnTimer = 0;
+      lastTime = performance.now();
+      cameraOffsetX = 0;
+    }
+    
+    requestAnimationFrame(gameLoop);
+  </script>
+  <!-- Example Mod: Draw a halo around the local player -->
+  <script>
+    registerMod({
+      onDraw: function(ctx) {
+        ctx.strokeStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(localPlayer.x - cameraOffsetX + localPlayer.width/2, localPlayer.y + localPlayer.height/2, 60, 0, Math.PI*2);
+        ctx.stroke();
+      },
+      onGameStart: function() { console.log("Mod: Game started!"); },
+      onGameOver: function(state) { console.log("Mod: Game Over!", state); }
+    });
+  </script>
+</body>
+</html>
